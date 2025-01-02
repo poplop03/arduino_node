@@ -3,6 +3,9 @@
 #include <avr/interrupt.h>
 #include <math.h> // for fmod()
 
+
+#include <PID_v1.h>
+
 // Pin definitions
 #define ngat0 0
 #define ngat1 1
@@ -18,23 +21,21 @@
 #define stop2 9
 
 // PID and timing variables
-float dt1 = 0.01, last_time1;
-float dt2 = 0.01, last_time2;
-volatile float integral1, previous1, output1 = 0;
-volatile float integral2, previous2, output2 = 0;
-float kp1, ki1, kd1;
-float kp2, ki2, kd2;
-float Setpoint1 = 0.0; 
-float Setpoint2 = 0.0;  // Initialize Setpoint with 0.0
-float Setpoint = 0.0;  // Initialize Setpoint with 0.0
+float dt1 = 0.1, last_time1;
+float dt2 = 0.1, last_time2;
+double integral1, previous1, output1 = 0;
+double integral2, previous2, output2 = 0;
+double Setpoint1 = 0.0; 
+double Setpoint2 = 0.0;  // Initialize Setpoint with 0.0
+double Setpoint = 0.0;  // Initialize Setpoint with 0.0
 
 volatile float error1, error2;
 
 volatile int pulse1 = 0;
 volatile int pulse2 = 0;
 
-volatile float wheelRps1 = 0;
-volatile float wheelRps2 = 0;
+double wheelRps1 = 0;
+double wheelRps2 = 0;
 
 volatile bool CO_U = false;
 
@@ -60,9 +61,11 @@ ros::Subscriber<std_msgs::Float32MultiArray> setpointSubscriber("setpoint", &set
 
 // Interrupt Service Routine for reading motor speed
 ISR(TIMER1_OVF_vect) {
-  TCNT1 = 63036;
-  nh.spinOnce();
-  CO_U = true;
+  TCNT1 = 40536;
+  wheelRps1 = (pulse1/50.0)/dt1;
+  wheelRps2 = (pulse2/50.0)/dt2;
+  pulse1 = 0;
+  pulse2 = 0;
 }
 
 // Count pulses for Motor 1
@@ -78,9 +81,9 @@ void cntPuls2() {
 // Motor control function
 void driveMotor(int dirpin, int pwmPin, float pwm) {
   if (pwm > 0) {
-    digitalWrite(dirpin, 1);
+    digitalWrite(dirpin, HIGH);
   } else {
-    digitalWrite(dirpin, 0);
+    digitalWrite(dirpin, LOW);
   }
   analogWrite(pwmPin, abs(abs(pwm) - 255));
 }
@@ -107,15 +110,18 @@ float saturate(long input, long max) {
   return output;
 }
 
+double kp1 = 26.5, ki1 = 1, kd1 = 0.05;
+double kp2 = 26.5, ki2 = 1, kd2 = 0.05;
+
+
+PID PID1(&wheelRps1, &output1, &Setpoint, kp1, ki1, kd1, DIRECT);
+PID PID2(&wheelRps2, &output2, &Setpoint, kp2, ki2, kd2, DIRECT);
+
+
+
 // Setup function
 void setup() {
-  kp1 = 20;
-  ki1 = 2;
-  kd1 = 0.15;
 
-  kp2 = 20;
-  ki2 = 2;
-  kd2 = 0.15;
 
   last_time1 = 0;
   last_time2 = 0;
@@ -128,38 +134,56 @@ void setup() {
   pinMode(dir2, OUTPUT);
   pinMode(pwm2, OUTPUT);  
 
-  //Serial.begin(57600);
+  Serial.begin(57600);
 
   cli();                                  // Disable global interrupts
   timer1Init();
   sei();                                  // Enable global interrupts
 
-  nh.initNode();                          // Initialize ROS node
-  nh.subscribe(setpointSubscriber);       // Subscribe to the "information" topic
+  PID1.SetMode(AUTOMATIC);
+  PID1.SetSampleTime(1);
+  PID2.SetMode(AUTOMATIC);
+  PID2.SetSampleTime(1);
+
+  //nh.initNode();                          // Initialize ROS node
+  //nh.subscribe(setpointSubscriber);       // Subscribe to the "information" topic
 }
 
 // Main loop function
 void loop() {
-  // Process incoming ROS messages
   
-  if (CO_U == true) {
-    CO_U = false;
-    wheelRps1 = (pulse1 / 50.0) / 0.01;
-    wheelRps2 = (pulse2 / 50.0) / 0.01;
-    pulse1 = 0;
-    pulse2 = 0;
-    error1 = Setpoint - wheelRps1;
-    output1 = pid1(error1);
-    error2 = Setpoint - wheelRps2;
-    output2 = pid2(error2);
-    driveMotor(dir1, pwm1, -Setpoint1);
-    driveMotor(dir2, pwm2, Setpoint2);
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    Setpoint = input.toFloat();
   }
+  //nh.spinOnce();
+  
+  Setpoint = 2;
+    PID1.Compute();
+    PID2.Compute();
+    driveMotor(dir1, pwm1, -output1);
+    driveMotor(dir2, pwm2, output2);
+    pr_data();
+}
 
+void pr_data_gui(){
+  Serial.print(output1);
+  Serial.print(",");
+  Serial.print(wheelRps1);
+  Serial.print(",");
+  Serial.print(output2);
+  Serial.print(",");
+  Serial.print(wheelRps2);
+  Serial.print(",");
+  Serial.print(Setpoint);
+  Serial.print(",");
+  Serial.print(error1);
+  Serial.print(",");
+  Serial.println(error2);
 }
 void pr_data() {
   Serial.print("output1: ");
-  Serial.print(Setpoint);
+  Serial.print(output2);
   Serial.print("\t");
   Serial.print("\t");
   Serial.print("wheelRps1: ");
@@ -167,14 +191,14 @@ void pr_data() {
   Serial.print("\t");
   Serial.print("\t");
   Serial.print("output2: ");
-  Serial.print(Setpoint);
+  Serial.print(output2);
   Serial.print("\t");
   Serial.print("\t");
   Serial.print("wheelRps2: ");
   Serial.print(wheelRps2);
   Serial.print("\t");
   Serial.print("\t");
-  Serial.println("Setpoint: ");
+  Serial.print("Setpoint: ");
   Serial.print(Setpoint);
   Serial.print("\t");
   Serial.print("\t");
